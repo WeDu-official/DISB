@@ -5,6 +5,8 @@ import PowerDB as PDB
 import io
 import shutil
 def runbot(TOKEN,DATABASE_FILE,DOWNLOAD_FOLDER):
+    if not DATABASE_FILE[-4:] == '.pdb':
+        DATABASE_FILE = DATABASE_FILE+'.pdb'
     def create_database():
         if not os.path.exists(DATABASE_FILE):
             PDB.create.makeDB(DATABASE_FILE)
