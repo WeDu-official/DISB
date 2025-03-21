@@ -6,7 +6,7 @@
 
 **\*1: THE DISB wasn't tested on any operating system expect window
 and the 32-bit version of it wasn't tested, only window 64-bit operating system was tested**
-
+ 
 **DISB** is a very powerful way to upload to/download from discord, even if the file is passing the 10 MB per message
 limit, and I made it for the sake of people and because I believe it's a right to store and keep the ideas and things
 of people written by storing them how matter what and without any cost.
