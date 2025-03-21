@@ -31,7 +31,7 @@ def runbot(TOKEN,DATABASE_FILE,DOWNLOAD_FOLDER):
 
         filename = os.path.basename(local_file_path)
         file_size = os.path.getsize(local_file_path)
-        max_file_size = 9 * 1024 * 1024  # 9 MB
+        max_file_size = 10 * 1024 * 1024  # 10 MB
 
         if file_size <= max_file_size:
             try:
