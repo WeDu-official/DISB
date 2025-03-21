@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "DISB"
-version = "1.0.0"
+version = "1.0"
 authors = [
   { name="WeDu-official", email="fplu.the.founder@gmail.com" },
 ]
@@ -12,7 +12,7 @@ dependencies = [
     "discord.py >= 2.5.2",
     "PowerDB >= 2.1.5"
 ]
-description = "a library for facial recognition(everything from training to recognizing)"
+description = 'this is the "discord infinity storage bot", it basically turns discord into unlimited cloud storage'
 readme = "README.md"
 requires-python = ">=3.10"
 classifiers = [
