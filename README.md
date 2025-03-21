@@ -1,4 +1,5 @@
-<img src="https://github.com/user-attachments/assets/a1b834d0-44dd-405d-8db5-2855a35d7232" alt="DISBlogo-removebg-preview" width="500">
+<img src="https://github.com/user-attachments/assets/1ac7500a-b8df-4247-88b6-4d69d0dc6b60" alt="DISBlogo" width="500">
+
 
 **DISB** this is the "discord infinity storage bot", it basically turns discord into unlimited cloud storage
 
