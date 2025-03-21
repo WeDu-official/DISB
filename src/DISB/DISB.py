@@ -4,13 +4,15 @@ import os
 import PowerDB as PDB
 import io
 import shutil
-def runbot(TOKEN,DATABASE_FILE,DOWNLOAD_FOLDER):
+def runbot(TOKEN, DATABASE_FILE, DOWNLOAD_FOLDER):
     if not DATABASE_FILE[-4:] == '.pdb':
-        DATABASE_FILE = DATABASE_FILE+'.pdb'
+        DATABASE_FILE = DATABASE_FILE + '.pdb'
+
     def create_database():
         if not os.path.exists(DATABASE_FILE):
             PDB.create.makeDB(DATABASE_FILE)
-        PDB.create.maketable(DATABASE_FILE,'files')
+        PDB.create.maketable(DATABASE_FILE, 'files')
+
     create_database()
 
     if not os.path.exists(DOWNLOAD_FOLDER):
@@ -75,7 +77,6 @@ def runbot(TOKEN,DATABASE_FILE,DOWNLOAD_FOLDER):
     processed_message_ids = set()
     @bot.command(name='download')
     async def download(ctx, filename: str):
-        global processed_message_ids
         message_id = ctx.message.id
         print(f"Received download command for '{filename}' with message ID: {message_id}")
 
@@ -87,7 +88,6 @@ def runbot(TOKEN,DATABASE_FILE,DOWNLOAD_FOLDER):
 
         processed_message_ids.add(message_id)
 
-        global downloading_files
         if filename in downloading_files:
             await ctx.send(f'Download for "{filename}" is already in progress.')
             processed_message_ids.remove(message_id)
@@ -96,9 +96,9 @@ def runbot(TOKEN,DATABASE_FILE,DOWNLOAD_FOLDER):
         downloading_files.add(filename)
 
         parts_to_download = sorted(((part[2], part[3], part[4])
-    for part in (PDB.table_data.readcolumns(DATABASE_FILE, [0, i])
-    for i in range(PDB.table_data.numberrows(DATABASE_FILE, [0, 0], False)))
-    if part[1] == filename), key=lambda x: x[0], )
+                                    for part in (PDB.table_data.readcolumns(DATABASE_FILE, [0, i])
+                                                 for i in range(PDB.table_data.numberrows(DATABASE_FILE, [0, 0], False)))
+                                   if part[1] == filename), key=lambda x: x[0], )
         print(parts_to_download)
         if not parts_to_download:
             await ctx.send('File not found in database.')
@@ -106,13 +106,13 @@ def runbot(TOKEN,DATABASE_FILE,DOWNLOAD_FOLDER):
             processed_message_ids.remove(message_id)
             return
 
-        total_parts_value = int(parts_to_download[0][1]) if parts_to_download else 0 # Ensure total_parts_value is an integer
+        total_parts_value = int(parts_to_download[0][1]) if parts_to_download else 0
         await ctx.send(f'Attempting to download and reassemble "{filename}" locally (expecting {total_parts_value} parts)...')
 
         temp_dir = f'temp_download_{filename}'
         os.makedirs(temp_dir, exist_ok=True)
         reassembled = False
-        parts_dict = {int(part[0]): part[2] for part in parts_to_download} # Ensure keys in parts_dict are integers
+        parts_dict = {int(part[0]): part[2] for part in parts_to_download}
 
         if len(parts_dict) != total_parts_value or any(i + 1 not in parts_dict for i in range(total_parts_value)):
             await ctx.send(f"Error: Incomplete set of {total_parts_value} parts found.")
@@ -122,7 +122,6 @@ def runbot(TOKEN,DATABASE_FILE,DOWNLOAD_FOLDER):
             part_files = {}
             successful_download = True
 
-            # Deduplicate parts_to_download
             unique_parts = []
             seen = set()
             for part_number, total_parts, message_id_to_fetch in parts_to_download:
@@ -130,9 +129,8 @@ def runbot(TOKEN,DATABASE_FILE,DOWNLOAD_FOLDER):
                     unique_parts.append((part_number, total_parts, message_id_to_fetch))
                     seen.add((part_number, message_id_to_fetch))
 
-            processed_parts = set() #Track processed parts
+            processed_parts = set()
 
-            # Iterate through the unique parts
             for part_number, _, message_id_to_fetch in unique_parts:
                 print(f"Attempting to download part {part_number} of {total_parts_value}")
                 if message_id_to_fetch:
