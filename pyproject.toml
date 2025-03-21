@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "DISB"
+version = "1.0.0"
+authors = [
+  { name="WeDu-official", email="fplu.the.founder@gmail.com" },
+]
+dependencies = [
+    "discord.py >= 2.5.2",
+    "PowerDB >= 2.1.5"
+]
+description = "a library for facial recognition(everything from training to recognizing)"
+readme = "README.md"
+requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 6 - Mature",
+    "Intended Audience :: Developers",
+    "Natural Language :: English",
+    "Operating System :: Microsoft :: Windows :: Windows 8.1",
+    "Operating System :: Microsoft :: Windows :: Windows 10",
+    "Operating System :: Microsoft :: Windows :: Windows 11",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Home Automation",
+    "Topic :: Multimedia :: Video :: Capture",
+    "Topic :: Scientific/Engineering :: Image Processing",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+    "Topic :: Multimedia :: Graphics :: Capture :: Digital Camera",
+    "License :: Other/Proprietary License"
+]
+
+[project.urls]
+Homepage = "https://github.com/WeDu-official/DISB"
+Issues = "https://github.com/WeDu-official/DISB/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/DISB"]
