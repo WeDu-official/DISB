@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "DISB"
-version = "1.0.6"
+version = "1.0.7"
 authors = [
   { name="WeDu-official", email="fplu.the.founder@gmail.com" },
 ]
 dependencies = [
     "discord.py >= 2.5.2",
-    "PowerDB >= 2.1.5"
+    "PowerDB >= 2.1.6"
 ]
 description = 'this is the "discord infinity storage bot", it basically turns discord into unlimited cloud storage'
 readme = "README.md"
