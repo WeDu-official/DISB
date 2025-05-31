@@ -4,14 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "DISB"
-version = "2.0.0.3"
+version = "2.0.0.4"
 authors = [
   { name="WeDu-official", email="fplu.the.founder@gmail.com" },
 ]
 dependencies = [
     "discord.py >= 2.5.2",
     "aiohttp >= 3.11.18",
-    "PowerDB >= 2.2.3.2"
+    "PowerDB >= 2.2.5.3"
 ]
 description = 'this is the "discord infinity storage bot", it basically turns discord into unlimited cloud storage'
 readme = "README.md"
@@ -42,4 +42,4 @@ Homepage = "https://github.com/WeDu-official/DISB"
 Issues = "https://github.com/WeDu-official/DISB/issues"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/DISB"]
+packages = ["src/DISB/DISB.py"]
