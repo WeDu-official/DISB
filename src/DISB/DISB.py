@@ -155,7 +155,7 @@ class FileBotAPI(commands.Bot):
             try:
                 await initial_response_message.edit(
                     content=f"{user_mention}, error during upload: {e}. See logs for details.")
-            except iscord.HTTPException:
+            except discord.HTTPException:
                 await interaction.followup.send(
                     f"{user_mention}, an error occurred during upload: {e}. See logs for details.", ephemeral=False)
         finally:
