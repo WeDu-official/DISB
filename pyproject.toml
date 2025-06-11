@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "DISB"
-version = "2.0.0.4"
+version = "2.1"
 authors = [
   { name="WeDu-official", email="fplu.the.founder@gmail.com" },
 ]

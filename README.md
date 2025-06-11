@@ -4,7 +4,9 @@
 
 <H3>DISB GOT A FULL REMAKE FROM SCRATCH, THIS IS THE NEW STARTUP FOR DISB CALLED "DISB 2.0 (RELEASED IN 5/20/25)"</H3>
 
-**NOTE: THE DISB ONLY work in almost any operating system(\*1) which can support python 3.10 and above**
+**NOTE: DISB got a full scale bug fixes and solving issues that made it unusable and few user improvements in "DISB 2.1 (RELEASED IN 6/11/25)"**
+
+**NOTE2: DISB ONLY work in almost any operating system(\*1) which can support python 3.10 and above**
 
 **\*1: THE DISB wasn't tested on any operating system expect window
 and the 32-bit version of it wasn't tested, only window 64-bit operating system was tested**
