@@ -95,16 +95,16 @@ class FileBotAPI(commands.Bot):
         user_mention = interaction.user.mention
         if not database_file:
             await interaction.followup.send(f"{user_mention}, please specify the database file.",
-                                            ephemeral=True)
+                                            ephemeral=False)
             return
         await self.list_files(interaction, database_file)
     async def delete_filea(self, interaction: discord.Interaction, filename: str, database_file: str):
         user_mention = interaction.user.mention
         if not filename:
-            await interaction.followup.send(f"{user_mention}, please specify the filename to delete.", ephemeral=True)
+            await interaction.followup.send(f"{user_mention}, please specify the filename to delete.", ephemeral=False)
             return
         if not database_file:
-            await interaction.followup.send(f"{user_mention}, please specify the database file.", ephemeral=True)
+            await interaction.followup.send(f"{user_mention}, please specify the database file.", ephemeral=False)
             return
         await self.delete(interaction, filename,
                           database_file)
@@ -113,27 +113,27 @@ class FileBotAPI(commands.Bot):
         user_mention = interaction.user.mention
         if not local_file_path:
             await interaction.followup.send(f"{user_mention}, please specify the local file path to upload.",
-                                            ephemeral=True)
+                                            ephemeral=False)
             return
         if not database_file:
-            await interaction.followup.send(f"{user_mention}, please specify the database file to use.", ephemeral=True)
+            await interaction.followup.send(f"{user_mention}, please specify the database file to use.", ephemeral=False)
             return
         local_file_path = os.path.abspath(local_file_path)
         filename = os.path.basename(local_file_path)
         self.log(f"Upload requested by {interaction.user.id} for '{filename}' to database '{database_file}'.")
         if interaction.user.id in self.user_uploading and filename in self.user_uploading[interaction.user.id]:
             await interaction.followup.send(f"{user_mention}, you are already uploading '{filename}'. Please wait.",
-                                            ephemeral=True)
+                                            ephemeral=False)
             return
         if not os.path.exists(local_file_path):
             await interaction.followup.send(f"{user_mention}, file '{filename}' not found at '{local_file_path}'.",
-                                            ephemeral=True)
+                                            ephemeral=False)
             self.log(f"Error: File not found at '{local_file_path}' for user {interaction.user.id}.")
             return
         if self.upload_semaphore.locked():
             await interaction.followup.send(
                 f"{user_mention}, server is busy with 3 upload requests going at the same time(maximum)",
-                ephemeral=True)
+                ephemeral=False)
             self.log(f"Upload limit reached. User {interaction.user.id} waiting.")
             return
         if interaction.user.id not in self.user_uploading:
@@ -155,9 +155,9 @@ class FileBotAPI(commands.Bot):
             try:
                 await initial_response_message.edit(
                     content=f"{user_mention}, error during upload: {e}. See logs for details.")
-            except discord.HTTPException:
+            except iscord.HTTPException:
                 await interaction.followup.send(
-                    f"{user_mention}, an error occurred during upload: {e}. See logs for details.", ephemeral=True)
+                    f"{user_mention}, an error occurred during upload: {e}. See logs for details.", ephemeral=False)
         finally:
             if interaction.user.id in self.user_uploading:
                 if filename in self.user_uploading[interaction.user.id]:
@@ -637,7 +637,7 @@ class FileBotAPI(commands.Bot):
             if not os.path.exists(DATABASE_FILE):
                 await interaction.followup.send(
                     f"{user_mention}, the database file '{DB_FILE}' was not found. Cannot proceed with deletion.",
-                    ephemeral=True)
+                    ephemeral=False)
                 self.log(f">>> [DELETE] ERROR: Database file not found at '{DATABASE_FILE}'.")
                 pdb.create.make_db(DATABASE_FILE)
                 pdb.create.make_table(DATABASE_FILE, 'files')
@@ -652,13 +652,13 @@ class FileBotAPI(commands.Bot):
             except Exception as e:
                 await interaction.followup.send(
                     f"{user_mention}, error reading the database to find '{filename}' for deletion: {e}",
-                    ephemeral=True)
+                    ephemeral=False)
                 self.log(f">>> [DELETE] ERROR: Error reading database for '{filename}': {e}")
                 self.log(traceback.format_exc())
                 return
             if not rows_to_delete:
                 await interaction.followup.send(f'{user_mention}, file "{filename}" not found in the database.',
-                                                ephemeral=True)
+                                                ephemeral=False)
                 self.log(f">>> [DELETE] ERROR: File '{filename}' not found in database.")
                 return
             rows_to_delete = sorted(list(set(rows_to_delete)), reverse=True)
@@ -714,13 +714,13 @@ class FileBotAPI(commands.Bot):
             except OSError as e:
                 await interaction.followup.send(
                     f"{user_mention}, error updating database after deleting '{filename}': {e}",
-                    ephemeral=True)
+                    ephemeral=False)
                 self.log(f">>> [DELETE] ERROR: Error updating database: {e}")
                 return
             except Exception as e:
                 await interaction.followup.send(
                     f"{user_mention}, an unexpected error occurred while updating the database: {e}",
-                    ephemeral=True)
+                    ephemeral=False)
                 self.log(f">>> [DELETE] ERROR: Unexpected error during database update: {e}")
                 self.log(traceback.format_exc())
                 return
@@ -731,17 +731,17 @@ class FileBotAPI(commands.Bot):
         except discord.Forbidden:
             await interaction.followup.send(
                 f"{user_mention}, I don't have permission to delete messages in the channel(s) where the file parts are located.",
-                ephemeral=True)
+                ephemeral=False)
             self.log(f">>> [DELETE] ERROR: Forbidden to delete messages.")
         except (discord.NotFound, discord.HTTPException) as e:
             await interaction.followup.send(f"{user_mention}, an error occurred during the deletion process: {e}",
-                                            ephemeral=True)
+                                            ephemeral=False)
             self.log(f">>> [DELETE] ERROR: Discord API error during deletion: {e}")
             self.log(traceback.format_exc())
         except Exception as e:
             await interaction.followup.send(
                 f"{user_mention}, an unexpected error occurred during the deletion of '{filename}': {e}",
-                ephemeral=True)
+                ephemeral=False)
             self.log(f">>> [DELETE] ERROR: Unexpected error during deletion: {e}")
             self.log(traceback.format_exc())
         finally:
@@ -868,7 +868,7 @@ class FileBotAPI(commands.Bot):
         if self.upload_semaphore._value < 3:
             await interaction.followup.send(
                 f"{user_mention}, System is currently handling uploads. Please try listing files again later.",
-                ephemeral=True)
+                ephemeral=False)
             self.log(f">>> [LIST FILES] , NOT ALLOWED TO LIST FILES WHILE SYSTEM IS UPLOADING FILES.")
             return
         await interaction.followup.send(f"{user_mention}, Fetching file list...", ephemeral=False)
@@ -879,7 +879,7 @@ class FileBotAPI(commands.Bot):
             DATABASE_FILE = os.path.abspath(os.path.normpath(DB_FILE))
             if not os.path.exists(DATABASE_FILE):
                 await interaction.followup.send(f"{user_mention}, the database file '{DB_FILE}' was not found.",
-                                                ephemeral=True)
+                                                ephemeral=False)
                 self.log(f">>> [LIST FILES] ERROR: Database file not found at '{DATABASE_FILE}'.")
                 pdb.create.make_db(DATABASE_FILE)
                 pdb.create.make_table(DATABASE_FILE, 'files')
@@ -903,7 +903,7 @@ class FileBotAPI(commands.Bot):
             except Exception as e:
                 await interaction.followup.send(
                     f"{user_mention}, an error occurred while reading the list of files: {e}",
-                    ephemeral=True)
+                    ephemeral=False)
                 self.log(f">>> [LIST FILES] ERROR: An error occurred while reading database: {e}")
                 self.log(traceback.format_exc())
                 return
@@ -911,7 +911,7 @@ class FileBotAPI(commands.Bot):
             self.log(f">>> [LIST FILES] ERROR: General exception in list_files: {e}")
             self.log(traceback.format_exc())
             await interaction.followup.send(f"{user_mention}, an unexpected error occurred while listing files: {e}",
-                                            ephemeral=True)
+                                            ephemeral=False)
 def startbot(BOT_TOKEN):
     intents = discord.Intents.default()
     intents.message_content = True
@@ -921,7 +921,7 @@ def startbot(BOT_TOKEN):
     @app_commands.describe(local_file_path="Path of the local file to "
                                            "upload.", database_file="Database file.")
     async def upload_command(interaction: discord.Interaction, local_file_path: str, database_file: str):
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer(ephemeral=False)
         channel_id = interaction.channel_id
         bot.loop.create_task(bot._start_upload_process(interaction, local_file_path, database_file, channel_id))
     @bot.tree.command(name="download", description="Download a file.")
@@ -929,16 +929,16 @@ def startbot(BOT_TOKEN):
                            download_folder="Folder to download the file to.")
     async def download_command(interaction: discord.Interaction, filename: str, database_file: str,
                                  download_folder: str):
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer(ephemeral=False)
         await bot.download_filea(interaction, filename, database_file, download_folder)
     @bot.tree.command(name="listfiles", description="Lists files.")
     @app_commands.describe(database_file="Database file.")
     async def listfiles_command(interaction: discord.Interaction, database_file: str):
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer(ephemeral=False)
         await bot.list_files(interaction, database_file)
     @bot.tree.command(name="delete", description="Deletes a file.")
     @app_commands.describe(filename="File name.", database_file="Database file.")
     async def delete_command(interaction: discord.Interaction, filename: str, database_file: str):
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer(ephemeral=False)
         await bot.delete(interaction, filename, database_file)
     bot.run(BOT_TOKEN)
