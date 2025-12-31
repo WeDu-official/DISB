@@ -1,6 +1,6 @@
 <img src="https://u.cubeupload.com/wedu/DISBlogo.png" alt="DISBlogo" width="500" />
 
-**DISB** this is the "discord infinity storage bot", it basically turns discord into unlimited cloud storage
+**DISB** this is the "discord infinity storage bot", it basically turns discord into unlimited cloud storage AND IT'S EXTERMILLY NON COMPLETE NOT USE
 
 <H3>DISB GOT A FULL REMAKE FROM SCRATCH, THIS IS THE NEW STARTUP FOR DISB CALLED "DISB 2.0 (RELEASED IN 5/20/25)"</H3>
 
