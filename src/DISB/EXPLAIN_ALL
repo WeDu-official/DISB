@@ -1,0 +1,129 @@
+DISCORD FUNCTIONS(API):
+interaction.user.id is the USERID
+interaction.user.mention it mentions the user by mentioning it's ID
+
+
+
+UPLOAD SYSTEM MAP AS FUNCTIONS:
+
+
+DISB.py: upload_command (THE ENTRY OR SLASH COMMAND)
+upload.py: UPLOAD(Class)/_start_upload_process:
+{uploadtools(Folder)/upload_metadata.py/UploadMetadata(class, inhert from database.py)
+*in database.py [DatabaseManager(Class)/_normalize_db_file_path
+
+uploadtools(Folder)/upload_manager.py/UploadManager(class)/_determine_root_name{
+uploadtools(Folder)/encryption_base.py/encrybase(class)/
+_generate_random_nickname}
+
+]]]IF FILE NICKNAME/ORIGINAL NAME IS NOT EMPTY[[[
+uploadtools(Folder)/encryption_upload.py/EncryptionManager(class)/
+_prepare_encryption_and_version {
+
+[if upload mode is newversion]{
+uploadtools(Folder)/upload_metadata.py/UploadMetadata(class, inhert from database.py)
+*in database.py [DatabaseManager(Class)/_db_read_sync
+
+uploadtools(Folder)/encryption_upload.py/EncryptionManager(class)/
+_resolve_target_item_for_new_version
+{
+uploadtools(Folder)/upload_metadata.py/UploadMetadata(class, inhert from database.py)
+*in database.py [DatabaseManager(Class)/_db_read_sync
+
+uploadtools(Folder)/upload_utils.py/UploadUtils(class)/_resolve_path_to_db_entry_keys
+
+versioning.py/VersioningManager(class)/_get_item_metadata_for_versioning{
+uploadtools(Folder)/upload_metadata.py/UploadMetadata(class, inhert from database.py)
+*in database.py [DatabaseManager(Class)/_db_read_sync
+}
+
+}
+
+versioning.py/VersioningManager(class)/_generate_next_version_string
+
+versioning.py/VersioningManager(class)/_check_item_version_exists{
+uploadtools(Folder)/upload_metadata.py/UploadMetadata(class, inhert from database.py)
+*in database.py [DatabaseManager(Class)/_db_read_sync
+}},else:
+[inherited_encryption_mode is non automatic]{
+uploadtools(Folder)/encryption_base.py/encrybase(class)/_generate_random_nickname
+}
+uploadtools(Folder)/encryption_base.py/encrybase(class)/_derive_key_from_seed
+)
+
+}
+
+[[[IF UPLOAD MODE WAS "NEW_UPLOAD"]]]{
+uploadtools(Folder)/upload_metadata.py/UploadMetadata(class)/
+_check_duplicate_root_upload_name{
+two of uploadtools(Folder)/upload_metadata.py/UploadMetadata(class, inhert from database.py)
+*in database.py [DatabaseManager(Class)/_db_read_sync
+[first one would always happen(folders existance),second one would only happen if first one is empty(files existance)]
+}
+}
+
+
+
+[[[IF THERE IS NO uploadtools(Folder)/upload_manager.py/UploadManager(class)/_acquire_user_upload_slot]]]
+
+uploadtools(Folder)/upload_utils.py/UploadUtils(class)/_get_chunk_size
+
+[[[overall_total_parts(which is return of uploadtools(Folder)/upload_utils.py/UploadUtils(class)/_precalculate_total_parts) IS NONE]]]{
+uploadtools(Folder)/upload_manager.py/UploadManager(class)/_release_upload_slot}
+
+[IF LOCAL PATH TO UPLOAD IS A FOLDER]({
+uploadtools(Folder)/upload_manager.py/UploadManager(class)/upload_folder_contents{
+uploadtools(Folder)/upload_metadata.py/UploadMetadata(class)/_store_root_folder_metadata{
+uploadtools(Folder)/upload_metadata.py/UploadMetadata(class)/_store_folder_metadata{
+[if not uploadtools(Folder)/upload_metadata.py/UploadMetadata(class)/is_folder_entry_in_db, which is in english
+if the folder doesn't exist in database]{
+uploadtools(Folder)/upload_metadata.py/UploadMetadata(class, inhert from database.py)
+*in database.py [DatabaseManager(Class)/_db_insert_sync}
+}
+}
+uploadtools(Folder)/upload_manager.py/UploadManager(class)/_walk_and_upload{
+uploadtools(Folder)/upload_utils.py/UploadUtils(class)/_process_subfolder{
+[if name of folder is with in the allowed range(60 characters)]{
+uploadtools(Folder)/encryption_base.py/encrybase(class)/_generate_random_nickname}
+
+uploadtools(Folder)/upload_metadata.py/UploadMetadata(class)/_store_folder_metadata{
+[if not uploadtools(Folder)/upload_metadata.py/UploadMetadata(class)/is_folder_entry_in_db, which is in english
+if the folder doesn't exist in database]{
+uploadtools(Folder)/upload_metadata.py/UploadMetadata(class, inhert from database.py)
+*in database.py [DatabaseManager(Class)/_db_insert_sync}
+}
+}
+
+}
+
+}
+},ELSE:
+uploadtools(Folder)/upload_manager.py/UploadManager(class)/upload_single_file{
+uploadtools(Folder)/upload_utils.py/UploadUtils(class)/_resolve_file_nickname{
+[if filename is less than allowed limit(60 characters)]{
+uploadtools(Folder)/encryption_base.py/encrybase(class)/_generate_random_nickname}
+}
+
+uploadtools(Folder)/upload_utils.py/UploadUtils(class)/_compute_display_path
+uploadtools(Folder)/upload_utils.py/UploadUtils(class)/_compute_file_parts
+uploadtools(Folder)/upload_utils.py/UploadUtils(class)/_read_file_chunks(USED AS NUMBER OF ITERS IN A FORLOOP)
+uploadtools(Folder)/upload_utils.py/UploadUtils(class)/_encrypt_chunk_if_needed{
+uploadtools(Folder)/encryption_base.py/encrybase(class)/_encrypt_data
+}
+uploadtools(Folder)/upload_manager.py/UploadManager(class)/_upload_chunk_to_discord{
+uploadtools(Folder)/baseapi.py/BASEapi(class)/_send_file_part_to_discord
+uploadtools(Folder)/upload_utils.py/UploadUtils(class)/_store_file_metadata{
+uploadtools(Folder)/upload_metadata.py/UploadMetadata(class, inhert from database.py)
+*in database.py [DatabaseManager(Class)/_db_insert_sync
+}
+
+}
+
+})
+
+[IF UPLOAD NOT SUCCUSFUL]{
+uploadtools(Folder)/upload_manager.py/UploadManager(class)/_handle_incomplete_upload}
+
+uploadtools(Folder)/upload_manager.py/UploadManager(class)/_release_upload_slot
+}
+
