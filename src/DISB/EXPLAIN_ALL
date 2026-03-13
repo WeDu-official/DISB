@@ -2,10 +2,7 @@ DISCORD FUNCTIONS(API):
 interaction.user.id is the USERID
 interaction.user.mention it mentions the user by mentioning it's ID
 
-
-
 UPLOAD SYSTEM MAP AS FUNCTIONS:
-
 
 DISB.py: upload_command (THE ENTRY OR SLASH COMMAND)
 upload.py: UPLOAD(Class)/_start_upload_process:
@@ -16,9 +13,22 @@ uploadtools(Folder)/upload_manager.py/UploadManager(class)/_determine_root_name{
 uploadtools(Folder)/encryption_base.py/encrybase(class)/
 _generate_random_nickname}
 
-]]]IF FILE NICKNAME/ORIGINAL NAME IS NOT EMPTY[[[
+
+[[[IF FILE NICKNAME/ORIGINAL NAME IS EMPTY]]]
 uploadtools(Folder)/encryption_upload.py/EncryptionManager(class)/
 _prepare_encryption_and_version {
+
+[[[IF UPLOAD MODE WAS "NEW_UPLOAD"]]]{
+uploadtools(Folder)/upload_metadata.py/UploadMetadata(class)/
+_check_duplicate_root_upload_name{
+two of uploadtools(Folder)/upload_metadata.py/UploadMetadata(class, inhert from database.py)
+*in database.py [DatabaseManager(Class)/_db_read_sync
+[first one would always happen(folders existance),second one would only happen if first one is empty(files existance)]
+}
+}
+
+[[[IF THERE IS NO uploadtools(Folder)/upload_manager.py/UploadManager(class)/_acquire_user_upload_slot]]]
+
 
 [if upload mode is newversion]{
 uploadtools(Folder)/upload_metadata.py/UploadMetadata(class, inhert from database.py)
@@ -52,20 +62,6 @@ uploadtools(Folder)/encryption_base.py/encrybase(class)/_derive_key_from_seed
 )
 
 }
-
-[[[IF UPLOAD MODE WAS "NEW_UPLOAD"]]]{
-uploadtools(Folder)/upload_metadata.py/UploadMetadata(class)/
-_check_duplicate_root_upload_name{
-two of uploadtools(Folder)/upload_metadata.py/UploadMetadata(class, inhert from database.py)
-*in database.py [DatabaseManager(Class)/_db_read_sync
-[first one would always happen(folders existance),second one would only happen if first one is empty(files existance)]
-}
-}
-
-
-
-[[[IF THERE IS NO uploadtools(Folder)/upload_manager.py/UploadManager(class)/_acquire_user_upload_slot]]]
-
 uploadtools(Folder)/upload_utils.py/UploadUtils(class)/_get_chunk_size
 
 [[[overall_total_parts(which is return of uploadtools(Folder)/upload_utils.py/UploadUtils(class)/_precalculate_total_parts) IS NONE]]]{
@@ -126,4 +122,6 @@ uploadtools(Folder)/upload_manager.py/UploadManager(class)/_handle_incomplete_up
 
 uploadtools(Folder)/upload_manager.py/UploadManager(class)/_release_upload_slot
 }
+
+DOWNLOAD SYSTEM MAP:
 

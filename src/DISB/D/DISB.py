@@ -26,7 +26,7 @@ import hashlib  # For hashing user-provided seeds
 import shutil  # For removing directories in cleanup
 from database import DatabaseManager
 from versioning import VersioningManager
-from upload import uploadmanager
+from upload import UPLOAD
 # Define intents globally as it's used when initializing the bot
 intents = discord.Intents.default()
 intents.message_content = True
@@ -48,7 +48,22 @@ aiohttp_logger = logging.getLogger('aiohttp')
 aiohttp_logger.setLevel(logging.WARNING)  # Same as discord_logger, to reduce network noise
 aiohttp_logger.addHandler(handler)
 
-
+log = logging.getLogger('DISB_Bot')
+file_table_columns = [
+    'fileid', 'base_filename', 'part_number', 'total_parts',
+    'message_id', 'channel_id', 'relative_path_in_archive', 'root_upload_name', 'upload_timestamp',
+    'original_root_name', 'is_nicknamed',
+    'original_base_filename', 'is_base_filename_nicknamed',
+    'encryption_mode', 'encryption_key_auto', 'password_seed_hash',
+    'store_hash_flag',
+    'version'  # Added new column for versioning
+]
+# Fixed salt and info for HKDF (should be constant and unique to your bot's encryption)
+db = DatabaseManager(file_table_columns=file_table_columns, log=log)
+version_manager = VersioningManager(db_read_func=db._db_read_sync, log=log)
+_HKDF_SALT = b"my_bot_encryption_salt_12345"
+_HKDF_INFO = b"discord_file_bot_encryption_info"
+sema=asyncio.Semaphore(3)
 class FileBotAPI(commands.Bot):
     def __init__(self, *, intents: discord.Intents):
         # noinspection PyTypeChecker
@@ -69,7 +84,7 @@ class FileBotAPI(commands.Bot):
         self.discord_api_delay = 0.05
         self.batch_size_discord_checks = 50
         self.batch_delay_discord_checks = 2.0
-        self.log = logging.getLogger('DISB_Bot')
+        self.log = log
         # Define PowerDB table schema for 'files' table (Table ID 0)
         # Column 0: fileid (unique ID for each part, per row)
         # Column 1: base_filename (e.g., 'image.jpg', 'document.pdf', or "_DIR_" for a folder)
@@ -92,20 +107,12 @@ class FileBotAPI(commands.Bot):
         # Column 15: password_seed_hash (SHA256 hash of user's seed for not_automatic mode, empty otherwise)
         # NEW for Zero-Knowledge Encryption (save_hash option)
         # Column 16: store_hash_flag (String "True" or "False", indicates if password_seed_hash is stored)
-        self.file_table_columns = [
-            'fileid', 'base_filename', 'part_number', 'total_parts',
-            'message_id', 'channel_id', 'relative_path_in_archive', 'root_upload_name', 'upload_timestamp',
-            'original_root_name', 'is_nicknamed',
-            'original_base_filename', 'is_base_filename_nicknamed',
-            'encryption_mode', 'encryption_key_auto', 'password_seed_hash',
-            'store_hash_flag',
-            'version'  # Added new column for versioning
-        ]
+        self.file_table_columns = file_table_columns
         # Fixed salt and info for HKDF (should be constant and unique to your bot's encryption)
-        self.db = DatabaseManager(file_table_columns=self.file_table_columns, log=self.log)
-        self.version_manager = VersioningManager(db_read_func=self.db._db_read_sync, log=self.log)
-        self._HKDF_SALT = b"my_bot_encryption_salt_12345"
-        self._HKDF_INFO = b"discord_file_bot_encryption_info"
+        self.db = db
+        self.version_manager = version_manager
+        self._HKDF_SALT = _HKDF_SALT
+        self._HKDF_INFO = _HKDF_INFO
 
     async def setup_hook(self):
         self.http_session = aiohttp.ClientSession()
@@ -134,218 +141,6 @@ class FileBotAPI(commands.Bot):
         # This will process commands defined with @bot.command() (not slash commands)
         # For slash commands, interaction processing is handled automatically by discord.py
         await self.process_commands(message)
-
-    async def _get_file_parts_from_discord(self, channel_id: int, message_ids: List[int],
-                                           encryption_key: Optional[bytes] = None) -> Dict[int, bytes]:
-        """
-        Fetches and optionally decrypts file parts from Discord messages with robust retry logic.
-        - Implements exponential backoff with jitter for retries.
-        - Attempts to fetch each message part multiple times.
-        """
-        part_data = {}
-        max_download_attempts = 15
-        initial_download_delay = 1.0  # seconds, for the first retry
-        max_download_delay = 60.0  # seconds, cap the exponential backoff delay
-
-        for msg_id in message_ids:
-            filename = ""
-            for attempt in range(max_download_attempts):
-                try:
-                    channel = self.get_channel(channel_id) or await self.fetch_channel(channel_id)
-                    if not isinstance(channel, (discord.TextChannel, discord.DMChannel, discord.Thread)):
-                        self.log.warning(
-                            f"Channel {channel_id} is not a text-based channel. Cannot fetch message {msg_id}. Skipping part.")
-                        break  # No point retrying if channel type is wrong
-
-                    message = await channel.fetch_message(msg_id)
-                    if not message.attachments:
-                        self.log.warning(f"Message {msg_id} has no attachments. Skipping this part.")
-                        break  # No attachments, no point retrying
-
-                    attachment = message.attachments[0]
-                    downloaded_bytes = await attachment.read()
-
-                    # --- Decryption ---
-                    if encryption_key is not None:
-                        try:
-                            self.log.debug(
-                                f"DEBUG: Key being passed to _decrypt_data: '{encryption_key}' (Type: {type(encryption_key)})")
-                            downloaded_bytes = self._decrypt_data(downloaded_bytes, encryption_key)
-                        except (InvalidToken, ValueError) as e:  # Catch specific decryption errors
-                            self.log.warning(f"Decryption failed for message {msg_id}: {e}. Skipping this part.")
-                            break  # Decryption failed, no point retrying this part
-                        except Exception as e:
-                            self.log.error(
-                                f"Unexpected error during decryption for message {msg_id}: {e}. Skipping this part.")
-                            self.log.error(traceback.format_exc())
-                            break  # Unexpected decryption error, stop retrying
-
-                    # Extract part number from filename (e.g., 'filename.part001')
-                    part_num = 0  # Default to 0 if not found
-                    try:
-                        filename = attachment.filename
-                        match = re.search(r'\.part(\d+)', filename)
-                        if match:
-                            part_num = int(match.group(1))
-                        else:
-                            self.log.warning(
-                                f"WARNING: Could not extract part number from filename '{filename}' for message {msg_id}. Defaulting to 0.")
-                    except ValueError:
-                        self.log.warning(
-                            f"WARNING: Could not parse part number from filename '{filename}' for message {msg_id}. Defaulting to 0.")
-
-                    part_data[part_num] = downloaded_bytes
-                    self.log.debug(f"Fetched part {part_num} from message {msg_id} on attempt {attempt + 1}.")
-                    break  # Successfully downloaded, move to next message_id
-
-                except (discord.NotFound, discord.Forbidden) as e:
-                    self.log.warning(
-                        f"Message {msg_id} in channel {channel_id} not found or forbidden on attempt {attempt + 1}/{max_download_attempts}: {e}. Skipping this part permanently.")
-                    break  # These are typically non-retryable errors
-                except (discord.HTTPException, asyncio.TimeoutError, aiohttp.ClientError) as e:
-                    # Catch Discord API errors, network timeouts, and aiohttp client errors
-                    self.log.warning(
-                        f"Failed to download part (Message ID: {msg_id}) "
-                        f"on attempt {attempt + 1}/{max_download_attempts} due to: {e}. "
-                        f"Retrying..."
-                    )
-                    if attempt < max_download_attempts - 1:  # Only calculate delay if more attempts are left
-                        retry_delay = self._calculate_retry_delay(attempt, initial_download_delay, max_download_delay)
-                        self.log.debug(f"Retrying download in {retry_delay:.2f} seconds...")
-                        await asyncio.sleep(retry_delay)
-                    else:
-                        self.log.error(
-                            f"Failed to download part (Message ID: {msg_id}) "
-                            f"after {max_download_attempts} attempts. This part will be missing."
-                        )
-                        break  # Max attempts reached for this part
-                except Exception as e:
-                    self.log.error(
-                        f"An unexpected error occurred while fetching message {msg_id} on attempt {attempt + 1}/{max_download_attempts}: {type(e).__name__}: {e!r}. No further retries for this part due to unexpected error.")
-                    self.log.error(traceback.format_exc())
-                    break  # Break out of retry loop for unexpected errors
-            else:  # This else block executes if the inner loop completes without a 'break'
-                self.log.error(
-                    f"Failed to download part (Message ID: {msg_id}) after {max_download_attempts} attempts. This part will be missing (loop completed).")
-        return part_data
-
-    async def _cleanup_incomplete_download_files(self, user_mention: str, channel_id: int,
-                                                 folder_or_file_to_remove: str):
-        """
-        Removes the specified folder or file and its contents from the local file system.
-        Sends confirmation/error messages to the user.
-        """
-        self.log.info(f">>> [CLEANUP] Attempting to remove: '{folder_or_file_to_remove}'")
-        try:
-            if os.path.isdir(folder_or_file_to_remove):
-                shutil.rmtree(folder_or_file_to_remove)
-                await self.send_message_robustly(
-                    channel_id,
-                    content=f"{user_mention}, Successfully removed the incomplete download folder located at `{folder_or_file_to_remove}`."
-                )
-                self.log.info(f">>> [CLEANUP] Successfully removed folder '{folder_or_file_to_remove}'.")
-            elif os.path.isfile(folder_or_file_to_remove):
-                os.remove(folder_or_file_to_remove)
-                await self.send_message_robustly(
-                    channel_id,
-                    content=f"{user_mention}, Successfully removed the incomplete download file located at `{folder_or_file_to_remove}`."
-                )
-                self.log.info(f">>> [CLEANUP] Successfully removed file '{folder_or_file_to_remove}'.")
-            else:
-                await self.send_message_robustly(
-                    channel_id,
-                    content=f"{user_mention}, The item `{folder_or_file_to_remove}` does not exist or has already been removed."
-                )
-                self.log.warning(f">>> [CLEANUP] Item '{folder_or_file_to_remove}' not found for removal.")
-        except OSError as e:
-            await self.send_message_robustly(
-                channel_id,
-                content=f"{user_mention}, Error removing incomplete download at `{folder_or_file_to_remove}`: {e}. You may need to delete it manually."
-            )
-            self.log.error(f">>> [CLEANUP] Error removing '{folder_or_file_to_remove}': {e}")
-            self.log.error(traceback.format_exc())
-        except Exception as e:
-            self.log.error(f">>> [CLEANUP] Unexpected error during cleanup of '{folder_or_file_to_remove}': {e}")
-            self.log.error(traceback.format_exc())
-            await self.send_message_robustly(
-                channel_id,
-                content=f"{user_mention}, An unexpected error occurred during cleanup of `{folder_or_file_to_remove}`: {e}. You may need to delete it manually."
-            )
-
-    def _get_original_path_components(self, all_db_entries: List[Dict[str, Any]],
-                                      root_upload_name_db: str,
-                                      relative_path_in_archive_db: str,
-                                      base_filename_db: str,
-                                      is_file: bool) -> Tuple[str, List[str], str]:
-        """
-        Converts internal DB path components (potentially nicknamed) into their original,
-        human-readable counterparts for disk paths and display.
-
-        Returns: (original_root_name, original_relative_path_segments, original_base_filename)
-        """
-        original_root_name = root_upload_name_db
-        original_relative_path_segments = []
-        original_base_filename = base_filename_db
-
-        # Find the root entry to get its original name if nicknamed
-        root_entry = next((e for e in all_db_entries
-                           if e.get('root_upload_name') == root_upload_name_db and
-                           e.get('relative_path_in_archive') == '' and
-                           e.get('base_filename') == '_DIR_'), None)
-        if root_entry and root_entry.get('is_nicknamed') and root_entry.get('original_root_name'):
-            original_root_name = root_entry['original_root_name']
-
-        # Process relative path segments
-        if relative_path_in_archive_db:
-            current_db_path_segment_for_lookup = ""
-            # Handle the case where relative_path_in_archive_db might be just a single segment, which is a file's parent folder
-            # or a nested folder itself.
-            path_segments_to_process = relative_path_in_archive_db.split('/')
-
-            for i, segment_db in enumerate(path_segments_to_process):
-                # Construct the full DB path for this segment to look up its _DIR_ entry
-                # This is tricky because root_upload_name_db is the *actual* root, not part of relative_path_in_archive
-
-                # If it's the first segment, its parent is the root_upload_name_db
-                if i == 0:
-                    db_path_for_segment_lookup = os.path.join(root_upload_name_db, segment_db).replace(os.path.sep, '/')
-                else:
-                    db_path_for_segment_lookup = os.path.join(root_upload_name_db, current_db_path_segment_for_lookup, segment_db).replace(os.path.sep, '/')
-
-                folder_entry_for_segment = next((e for e in all_db_entries
-                                                 if e.get('root_upload_name') == root_upload_name_db and
-                                                 e.get('relative_path_in_archive') == db_path_for_segment_lookup and
-                                                 e.get('base_filename') == '_DIR_'), None)
-
-                if folder_entry_for_segment and folder_entry_for_segment.get('is_base_filename_nicknamed') and \
-                        folder_entry_for_segment.get('original_base_filename'):
-                    original_relative_path_segments.append(folder_entry_for_segment['original_base_filename'])
-                else:
-                    original_relative_path_segments.append(segment_db)
-
-                # Update current_db_path_segment_for_lookup for the next iteration
-                if i == 0:
-                    current_db_path_segment_for_lookup = segment_db
-                else:
-                    current_db_path_segment_for_lookup = os.path.join(current_db_path_segment_for_lookup, segment_db)
-
-
-        # Process base filename (if it's a file, not a directory marker)
-        if is_file and base_filename_db != '_DIR_':
-            # Find the file entry to get its original name if nicknamed
-            # We look for any part of the file, as long as it matches the base_filename and relative_path
-            file_entry = next((e for e in all_db_entries
-                               if e.get('root_upload_name') == root_upload_name_db and
-                               e.get('relative_path_in_archive') == relative_path_in_archive_db and
-                               e.get('base_filename') == base_filename_db and
-                               e.get('part_number') >= 0),
-                              None)  # Use part_number >= 0 to identify the file entry itself
-            if file_entry and file_entry.get('is_base_filename_nicknamed') and file_entry.get('original_base_filename'):
-                original_base_filename = file_entry['original_base_filename']
-            elif not original_base_filename:  # Fallback if base_filename_db was empty or not found in entry
-                original_base_filename = "unknown_file.bin"
-
-        return original_root_name, original_relative_path_segments, original_base_filename
 
     # noinspection PyUnresolvedReferences
     async def download_filea(self, interaction: discord.Interaction, target_path: str, DB_FILE: str,
@@ -2872,57 +2667,6 @@ class DecryptionPasswordTriggerView(discord.ui.View):
         button.disabled = True
         await button_interaction.message.edit(view=self)
 
-class ZeroKnowledgeDecryptionFailureView(discord.ui.View):
-    def __init__(self, bot_instance: 'FileBotAPI', original_interaction: discord.Interaction,
-                 local_base_path_for_cleanup: str,
-                 overall_parts_downloaded_counter_ref: int, overall_total_parts_to_download_ref: int,
-                 current_file_total_parts: int):
-        super().__init__(timeout=180)
-        self.bot = bot_instance
-        self.original_interaction = original_interaction
-        self.local_base_path_for_cleanup = local_base_path_for_cleanup
-        self.overall_parts_downloaded_counter_ref = overall_parts_downloaded_counter_ref
-        self.overall_total_parts_to_download_ref = overall_total_parts_to_download_ref
-        self.current_file_total_parts = current_file_total_parts
-        self.choice = None # Will store user's choice: "cancel_all", "cancel_keep", "continue"
-
-    async def _disable_all_buttons(self, interaction: discord.Interaction):
-        for item in self.children:
-            item.disabled = True
-        await interaction.message.edit(view=self)
-
-    @discord.ui.button(label="Cancel All & Remove Files", style=discord.ButtonStyle.red, emoji="🗑️", custom_id="cancel_all_remove")
-    async def cancel_all_remove_button(self, button_interaction: discord.Interaction, button: discord.ui.Button):
-        self.choice = "cancel_all"
-        await self._disable_all_buttons(button_interaction)
-        await button_interaction.response.send_message(
-            f"{button_interaction.user.mention}, Cancelling download and removing partially downloaded files. This may take a moment...",
-            ephemeral=True
-        )
-        # This will cause the download_filea to raise an exception, which will trigger cleanup.
-        self.stop() # Stop the wait() in download_filea
-
-    @discord.ui.button(label="Cancel & Keep Files", style=discord.ButtonStyle.grey, emoji="❌", custom_id="cancel_keep_files")
-    async def cancel_keep_files_button(self, button_interaction: discord.Interaction, button: discord.ui.Button):
-        self.choice = "cancel_keep"
-        await self._disable_all_buttons(button_interaction)
-        await button_interaction.response.send_message(
-            f"{button_interaction.user.mention}, Cancelling download. Partially downloaded files will remain on your machine.",
-            ephemeral=True
-        )
-        self.stop() # Stop the wait() in download_filea
-
-    @discord.ui.button(label="Continue (Skip Item)", style=discord.ButtonStyle.green, emoji="➡️", custom_id="continue_skip_item")
-    async def continue_skip_item_button(self, button_interaction: discord.Interaction, button: discord.ui.Button):
-        self.choice = "continue"
-        await self._disable_all_buttons(button_interaction)
-        await button_interaction.response.send_message(
-            f"{button_interaction.user.mention}, Skipping this item and continuing with the rest of the download.",
-            ephemeral=True
-        )
-        self.stop() # Stop the wait() in download_file
-
-
 class ListViewPaginator(discord.ui.View):
     def __init__(self, user_mention: str, all_items_to_display: List[Dict], total_pages: int, items_per_page: int,
                  initial_page: int, target_path_display: Optional[str] = None,
@@ -3202,436 +2946,476 @@ class ListViewPaginator(discord.ui.View):
 #-SETTING UP THE SLASH COMMANDS-
 #-------------------------------
 
-bot = FileBotAPI(intents=intents)
+if __name__ == "__main__":
+    bot = FileBotAPI(intents=intents)
 
-@bot.event
-async def on_ready():
-    """Event that fires when the bot is ready."""
-    bot.log.info(f'{bot.user} has connected to Discord!')
-    # Sync commands on ready; consider bot.tree.copy_global_to_guild(guild=discord.Object(id=YOUR_GUILD_ID))
-    # for faster testing in a dev guild.
-    await bot.tree.sync()
-    bot.log.info("Commands synced globally.")
+    @bot.event
+    async def on_ready():
+        """Event that fires when the bot is ready."""
+        bot.log.info(f'{bot.user} has connected to Discord!')
+        # Sync commands on ready; consider bot.tree.copy_global_to_guild(guild=discord.Object(id=YOUR_GUILD_ID))
+        # for faster testing in a dev guild.
+        await bot.tree.sync()
+        bot.log.info("Commands synced globally.")
 
-@bot.tree.command(
-    name="upload",
-    description="Uploads a file or folder with advanced options (versioning, encryption, custom name, etc.)."
-)
-@app_commands.describe(
-    local_path="Path to the file or folder on the bot's system.",
-    database_file="Database file (e.g., myfiles.db).",
-    encryption_mode="Select the encryption mode for your upload.",
-    upload_name="Optional: A custom name for this upload (max 60 chars).",
-    password_seed="Required for 'Not Automatic' encryption. Your seed password.",
-    random_seed="Automatically generate a random password seed (for Not Automatic encryption).",
-    save_hash="Store a hash of your password seed for zero-knowledge verification.",
-    upload_mode="Choose whether this is a new upload or a new version of an existing item.",
-    target_item_path="For new versions, the path of the existing item in the database.",
-    new_version_string="Optional: Override the version string for this upload."
-)
-@app_commands.choices(
-    encryption_mode=[
-        app_commands.Choice(name="Off (No Encryption)", value="off"),
-        app_commands.Choice(name="Automatic (Bot-managed Key)", value="automatic"),
-        app_commands.Choice(name="Not Automatic (User-provided Password Seed)", value="not_automatic")
-    ],
-    upload_mode=[
-        app_commands.Choice(name="New Upload", value="new_upload"),
-        app_commands.Choice(name="New Version", value="new_version")
-    ]
-)
-async def upload_command(
-    interaction: discord.Interaction,
-    local_path: str,
-    database_file: str,
-    encryption_mode: Optional[app_commands.Choice[str]] = None,
-    upload_name: Optional[str] = None,
-    password_seed: Optional[str] = None,
-    random_seed: bool = False,
-    save_hash: bool = True,
-    upload_mode: Optional[app_commands.Choice[str]] = None,
-    target_item_path: Optional[str] = None,
-    new_version_string: Optional[str] = None
-):
-    user_mention = interaction.user.mention
-    bot.log.debug(f"Starting /upload command for {interaction.user.id}")
+    @bot.tree.command(
+        name="upload",
+        description="Uploads a file or folder with advanced options (versioning, encryption, custom name, etc.)."
+    )
+    @app_commands.describe(
+        local_path="Path to the file or folder on the bot's system.",
+        database_file="Database file (e.g., myfiles.db).",
+        encryption_mode="Select the encryption mode for your upload.",
+        upload_name="Optional: A custom name for this upload (max 60 chars).",
+        password_seed="Required for 'Not Automatic' encryption. Your seed password.",
+        random_seed="Automatically generate a random password seed (for Not Automatic encryption).",
+        save_hash="Store a hash of your password seed for zero-knowledge verification.",
+        upload_mode="Choose whether this is a new upload or a new version of an existing item.",
+        target_item_path="For new versions, the path of the existing item in the database.",
+        new_version_string="Optional: Override the version string for this upload."
+    )
+    @app_commands.choices(
+        encryption_mode=[
+            app_commands.Choice(name="Off (No Encryption)", value="off"),
+            app_commands.Choice(name="Automatic (Bot-managed Key)", value="automatic"),
+            app_commands.Choice(name="Not Automatic (User-provided Password Seed)", value="not_automatic")
+        ],
+        upload_mode=[
+            app_commands.Choice(name="New Upload", value="new_upload"),
+            app_commands.Choice(name="New Version", value="new_version")
+        ]
+    )
+    async def upload_command(
+        interaction: discord.Interaction,
+        local_path: str,
+        database_file: str,
+        encryption_mode: Optional[app_commands.Choice[str]] = None,
+        upload_name: Optional[str] = None,
+        password_seed: Optional[str] = None,
+        random_seed: bool = False,
+        save_hash: bool = True,
+        upload_mode: Optional[app_commands.Choice[str]] = None,
+        target_item_path: Optional[str] = None,
+        new_version_string: Optional[str] = None
+    ):
+        user_mention = interaction.user.mention
+        bot.log.debug(f"Starting /upload command for {interaction.user.id}")
 
-    # Defer response
-    try:
-        await interaction.response.defer(ephemeral=False)
-        bot.log.debug(f"Deferred /upload command for {interaction.user.id}")
-    except discord.errors.NotFound as e:
-        await interaction.followup.send(
-            f"Interaction error: `{e}`. Please try again.",
-            ephemeral=True
-        )
-        return
-    except Exception as e:
-        await interaction.followup.send(
-            f"Unexpected error before processing `/upload`: `{e}`",
-            ephemeral=True
-        )
-        return
-
-    # Validate path
-    if not os.path.exists(local_path):
-        bot.log.error(f"Local path '{local_path}' does not exist for user {interaction.user.id}")
-        await interaction.edit_original_response(
-            content=f"{user_mention}, Error: The path '{local_path}' does not exist on the bot."
-        )
-        return
-
-    # Resolve encryption mode
-    encryption_mode_value = encryption_mode.value if encryption_mode else "automatic"
-
-    if encryption_mode_value == "not_automatic" and not password_seed and not random_seed:
-        await interaction.edit_original_response(
-            content=f"{user_mention}, Error: For 'Not Automatic' encryption, either provide `password_seed` or enable `random_seed`."
-        )
-        return
-
-    if encryption_mode_value != "not_automatic" and password_seed:
-        await interaction.followup.send(
-            content=f"{user_mention}, Warning: A `password_seed` was provided but encryption mode is not 'not_automatic'. It will be ignored.",
-            ephemeral=False
-        )
-
-    # Resolve upload mode
-    upload_mode_value = upload_mode.value if upload_mode else "new_upload"
-
-    # Create the upload task
-    bot.loop.create_task(bot._start_upload_process(
-        interaction=interaction,
-        local_path=local_path,
-        DB_FILE=database_file,
-        channel_id=interaction.channel_id,
-        custom_root_name=upload_name,
-        encryption_mode=encryption_mode_value,
-        user_seed=password_seed,
-        random_seed=random_seed,
-        save_hash=save_hash,
-        upload_mode=upload_mode_value,
-        target_item_path=target_item_path,
-        new_version_string=new_version_string
-    ))
-
-    bot.log.info(f"Initiated upload task for '{local_path}' by user {interaction.user.id}")
-
-@bot.tree.command(name="download", description="Download a file or a whole folder by its path in the archive.")
-@app_commands.describe(
-    target_path="Path to the file or folder (e.g., 'MyFolder/Subfolder/File.txt' or 'MyFolder').",
-    database_file="Database file (e.g., myfiles.db).",
-    download_folder="Folder to download the item(s) to."
-)
-async def download_command(interaction: discord.Interaction, target_path: str, database_file: str,
-                           download_folder: str):
-    user_mention = interaction.user.mention
-    bot.log.debug(f"Before defer for /download by {interaction.user.id}")
-    try:
-        # noinspection PyUnresolvedReferences
-        await interaction.response.defer(ephemeral=False)
-        bot.log.debug(f"After successful defer for /download by {interaction.user.id}")
-    except discord.errors.NotFound as e:
-        bot.log.debug(f"Defer failed for /download by {interaction.user.id}: {e}")
-        await interaction.followup.send(
-            f"An error occurred while trying to acknowledge your `/download` command. The interaction might have timed out. Please try again. Error: `{e}`",
-            ephemeral=True)
-        return
-    except Exception as e:
-        bot.log.debug(f"Unexpected error during defer for /download by {interaction.user.id}: {e}")
-        await interaction.followup.send(
-            f"An unexpected error occurred before processing your `/download` command. Error: `{e}`",
-            ephemeral=True)
-        return
-
-    if not os.path.isdir(download_folder):
-        bot.log.debug(
-            f"Download folder '{download_folder}' does not exist for user {interaction.user.id}. Attempting to create.")
+        # Defer response
         try:
-            os.makedirs(download_folder, exist_ok=True)
-            bot.log.debug(f"Successfully created download folder: {download_folder} for user {interaction.user.id}")
+            await interaction.response.defer(ephemeral=False)
+            bot.log.debug(f"Deferred /upload command for {interaction.user.id}")
+        except discord.errors.NotFound as e:
             await interaction.followup.send(
-                content=f"{user_mention}, Created download folder: `{download_folder}`.")
-        except OSError as e:
-            bot.log.debug(
-                f"Failed to create download folder '{download_folder}' for user {interaction.user.id}: {e}")
-            await interaction.edit_original_response(
-                content=f"{user_mention}, Error: Could not create download folder '{download_folder}': {e}. Please check the path and permissions.")
-            bot.log.error(f"Could not create download folder '{download_folder}': {e}")
-            return
-
-    # --- NEW LOGIC FOR DECRYPTION PASSWORD MODAL ---
-    required_passwords_info = await bot._get_items_requiring_password_for_download(database_file, target_path)
-
-    if required_passwords_info:
-        bot.log.info(f"Items requiring password found. Presenting modal for user {interaction.user.id}.")
-        modal = DecryptionPasswordModal(
-            bot_instance=bot,
-            original_interaction=interaction,  # Pass the original interaction
-            required_passwords_info=required_passwords_info,
-            database_file=database_file,
-            target_path=target_path,
-            download_folder=download_folder
-        )
-        try:
-            # Attempt to send the modal directly.
-            # This might fail if interaction.response has already been used (e.g., by the initial followup.send).
-            # noinspection PyUnresolvedReferences
-            await interaction.response.send_modal(modal)
-            bot.log.debug(f"Modal sent to user {interaction.user.id}.")
-        except discord.errors.InteractionResponded:
-            # If the interaction was already responded to, send a message with a button to trigger the modal.
-            bot.log.warning(
-                f"Interaction already responded to. Sending button to trigger modal for user {interaction.user.id}.")
-            await interaction.followup.send(
-                content=f"{user_mention}, Some items require decryption passwords. Please click the button below to enter them.",
-                view=DecryptionPasswordTriggerView(bot, interaction, required_passwords_info, database_file,
-                                                   target_path, download_folder)
-            )
-        except Exception as e:
-            bot.log.error(f"Error sending decryption password modal to user {interaction.user.id}: {e}")
-            await interaction.followup.send(
-                f"{user_mention}, An error occurred while trying to get decryption passwords. Please try again later. Error: `{e}`",
+                f"Interaction error: `{e}`. Please try again.",
                 ephemeral=True
             )
-    else:
-        bot.log.debug(f"No items requiring password for '{target_path}'. Proceeding with download_filea.")
-        await bot.download_filea(interaction, target_path, database_file, download_folder)
+            return
+        except Exception as e:
+            await interaction.followup.send(
+                f"Unexpected error before processing `/upload`: `{e}`",
+                ephemeral=True
+            )
+            return
+
+        # Validate path
+        if not os.path.exists(local_path):
+            bot.log.error(f"Local path '{local_path}' does not exist for user {interaction.user.id}")
+            await interaction.edit_original_response(
+                content=f"{user_mention}, Error: The path '{local_path}' does not exist on the bot."
+            )
+            return
+
+        # Resolve encryption mode
+        encryption_mode_value = encryption_mode.value if encryption_mode else "automatic"
+
+        if encryption_mode_value == "not_automatic" and not password_seed and not random_seed:
+            await interaction.edit_original_response(
+                content=f"{user_mention}, Error: For 'Not Automatic' encryption, either provide `password_seed` or enable `random_seed`."
+            )
+            return
+
+        if encryption_mode_value != "not_automatic" and password_seed:
+            await interaction.followup.send(
+                content=f"{user_mention}, Warning: A `password_seed` was provided but encryption mode is not 'not_automatic'. It will be ignored.",
+                ephemeral=False
+            )
+
+        # Resolve upload mode
+        upload_mode_value = upload_mode.value if upload_mode else "new_upload"
+        from uploadtools.upload_manager import UploadManager
+        from uploadtools.upload_metadata import UploadMetadata
+        from uploadtools.upload_utils import UploadUtils
+        from uploadtools.encryption_base import encrybase
+        from uploadtools.encryption_upload import EncryptionManager
+        from uploadtools.baseapi import BASEapi
+        ebase = encrybase(_HKDF_SALT,_HKDF_INFO,log)
+        meta = UploadMetadata(db,log,file_table_columns)
+        utils = UploadUtils(log, meta, ebase)
+        eup = EncryptionManager(db, version_manager, utils,log,_HKDF_SALT,_HKDF_INFO)
+        ba = BASEapi(log, bot_instance=bot)
+        user_uploading: Dict[int, List[str]] = {}
+        mang = UploadManager(bot,meta,user_uploading,utils,eup,ebase,log,bot.get_channel,ba,sema)
+        upload = UPLOAD(meta,mang,utils,eup,log,ba,sema)
+        # Create the upload task
+        bot.loop.create_task(upload._start_upload_process(
+            interaction=interaction,
+            local_path=local_path,
+            DB_FILE=database_file,
+            channel_id=interaction.channel_id,
+            custom_root_name=upload_name,
+            encryption_mode=encryption_mode_value,
+            user_seed=password_seed,
+            random_seed=random_seed,
+            save_hash=save_hash,
+            upload_mode=upload_mode_value,
+            target_item_path=target_item_path,
+            new_version_string=new_version_string
+        ))
+
+        bot.log.info(f"Initiated upload task for '{local_path}' by user {interaction.user.id}")
 
 
-@bot.tree.command(name="listfiles", description="Lists uploaded files or contents of a folder, with version control.")
-@app_commands.describe(database_file="Database file (e.g., myfiles.db).",
-                       target_root_name="Optional: Path to the file or folder to list (e.g., 'MyFolder' or 'MyFolder/SubFolder/File.txt'). Use '.' for all root items.",
-                       check_attachments_existance="Optional: If True, checks Discord attachments for file parts. Defaults to False.",
-                       show_original_name="Optional: If True, displays original names (if available) alongside nicknames. Defaults to False.",
-                       version="Optional: Specific version to list/check (for folders, lists contents of that version; for files, checks that version).",
-                       start_version="Optional: Start of a version range to check existence for.",
-                       end_version="Optional: End of a version range to check existence for. Requires start_version.",
-                       all_versions="Optional: If True, checks existence for all versions of the target item(s). Overrides 'version' and range parameters.",
-                       check_all_versions="Optional: If True, and no other explicit version is given, checks all versions' existence. Defaults to False.")
-async def listfiles_command(interaction: discord.Interaction, database_file: str,
-                            target_root_name: Optional[str] = None, check_attachments_existance: bool = False,
-                            show_original_name: bool = False,
-                            version: Optional[str] = None,
-                            start_version: Optional[str] = None,
-                            end_version: Optional[str] = None,
-                            all_versions: Optional[bool] = False,  # Changed type from Choice to bool
-                            check_all_versions: Optional[bool] = False):  # Changed type from Choice to bool
-    bot.log.debug(f"Before defer for /listfiles by {interaction.user.id}")
-    try:
-        # noinspection PyUnresolvedReferences
-        await interaction.response.defer(ephemeral=False)
-        bot.log.debug(f"After successful defer for /listfiles by {interaction.user.id}")
-    except discord.errors.NotFound as e:
-        bot.log.debug(f"Defer failed for /listfiles by {interaction.user.id}: {e}")
-        await interaction.followup.send(
-            f"An error occurred while trying to acknowledge your `/listfiles` command. The interaction might have timed out. Please try again. Error: `{e}`",
-            ephemeral=True)
-        return
-    except Exception as e:
-        bot.log.debug(f"Unexpected error during defer for /listfiles by {interaction.user.id}: {e}")
-        await interaction.followup.send(
-            f"An unexpected error occurred before processing your `/listfiles` command. Error: `{e}`",
-            ephemeral=True)
-        return
-
-    bot.log.debugo(
-        f"Calling bot.list_files for '{database_file}' (root: '{target_root_name}', show_original_name: {show_original_name}) by user {interaction.user.id}.")
-    await bot.list_files(
-        interaction,
-        database_file,
-        target_root_name,
-        check_attachments_existance,
-        show_original_name,
-        False,
-        # check_all parameter is no longer directly controlled by user from this command due to complex versioning checks. It's now internal.
-        version=version,
-        start_version=start_version,
-        end_version=end_version,
-        all_versions=all_versions,
-        check_all_versions=check_all_versions
+    @bot.tree.command(name="download", description="Download a file or a whole folder by its path in the archive.")
+    @app_commands.describe(
+        target_path="Path to the file or folder (e.g., 'MyFolder/Subfolder/File.txt' or 'MyFolder').",
+        database_file="Database file (e.g., myfiles.db).",
+        download_folder="Folder to download the item(s) to."
     )
+    async def download_command(interaction: discord.Interaction, target_path: str, database_file: str,
+                               download_folder: str):
+        user_mention = interaction.user.mention
+        bot.log.debug(f"Before defer for /download by {interaction.user.id}")
+        try:
+            await interaction.response.defer(ephemeral=False)
+            bot.log.debug(f"After successful defer for /download by {interaction.user.id}")
+        except discord.errors.NotFound as e:
+            bot.log.debug(f"Defer failed for /download by {interaction.user.id}: {e}")
+            await interaction.followup.send(
+                f"An error occurred while trying to acknowledge your `/download` command. The interaction might have timed out. Please try again. Error: `{e}`",
+                ephemeral=True)
+            return
+        except Exception as e:
+            bot.log.debug(f"Unexpected error during defer for /download by {interaction.user.id}: {e}")
+            await interaction.followup.send(
+                f"An unexpected error occurred before processing your `/download` command. Error: `{e}`",
+                ephemeral=True)
+            return
+        # Ensure download folder exists (same as before)
+        if not os.path.isdir(download_folder):
+            try:
+                os.makedirs(download_folder, exist_ok=True)
+                await interaction.followup.send(content=f"{user_mention}, Created download folder: `{download_folder}`.")
+            except OSError as e:
+                await interaction.edit_original_response(
+                    content=f"{user_mention}, Error: Could not create download folder '{download_folder}': {e}."
+                )
+                return
 
-# @bot.tree.command(name="listversions", description="Lists all versions of a specific file or folder.")
-# @app_commands.describe(
-#     database_file="Database file (e.g., myfiles.db).",
-#     target_path="The exact path to the file or folder (e.g., 'MyProject/MyDocument.txt' or 'MyProject/MyFolder')."
-# )
-# async def listversions_command(interaction: discord.Interaction, database_file: str, target_path: str):
-#     bot.log.debug(f"Before defer for /listversions by {interaction.user.id}")
-#     try:
-#         await interaction.response.defer(ephemeral=False)
-#         bot.log.debug(f"After successful defer for /listversions by {interaction.user.id}")
-#     except discord.errors.NotFound as e:
-#         bot.log.debug(f"Defer failed for /listversions by {interaction.user.id}: {e}")
-#         await interaction.followup.send(
-#             f"An error occurred while trying to acknowledge your `/listversions` command. The interaction might have timed out. Please try again. Error: `{e}`",
-#             ephemeral=True)
-#         return
-#     except Exception as e:
-#         bot.log.debug(f"Unexpected error during defer for /listversions by {interaction.user.id}: {e}")
-#         await interaction.followup.send(
-#             f"An unexpected error occurred before processing your `/listversions` command. Error: `{e}`",
-#             ephemeral=True)
-#         return
-#
-#     user_mention = interaction.user.mention
-#
-#     if not database_file.lower().endswith('.db'):
-#         database_file += '.db'
-#     DATABASE_FILE = os.path.abspath(os.path.normpath(database_file))
-#
-#     if not os.path.exists(DATABASE_FILE):
-#         await interaction.followup.send(
-#             content=f"{user_mention}, The database file '{database_file}' was not found. Cannot list versions.",
-#             ephemeral=False)
-#         bot.log.error(f">>> [LIST VERSIONS] ERROR: Database file not found at '{DATABASE_FILE}'.")
-#         return
-#
-#     all_db_entries = await bot.db._db_read_sync(DATABASE_FILE, {})
-#     if not all_db_entries:
-#         await interaction.followup.send(
-#             content=f'{user_mention}, No entries found in database: "{database_file}".', ephemeral=False)
-#         return
-#
-#     normalized_target_path = os.path.normpath(target_path).replace(os.path.sep, '/').strip('/')
-#
-#     # Resolve the target path to its root_upload_name, relative_path_in_archive, base_filename
-#     resolved_target_info = await bot._resolve_path_to_db_entry_keys(normalized_target_path, all_db_entries)
-#
-#     if not resolved_target_info:
-#         await interaction.followup.send(
-#             content=f"{user_mention}, The target item '{target_path}' was not found in the database. Please ensure the path is correct.",
-#             ephemeral=False)
-#         bot.log.info(f">>> [LIST VERSIONS] INFO: Target '{target_path}' not found for version listing.")
-#         return
-#
-#     target_r_name, target_r_path, target_b_name, is_target_a_folder = resolved_target_info
-#
-#     # Fetch all versions for the identified item
-#     all_versions_for_item = await bot.version_manager._get_relevant_item_versions(
-#         DATABASE_FILE,
-#         target_r_name,
-#         target_r_path,
-#         target_b_name,
-#         version_param=None,
-#         start_version_param=None,
-#         end_version_param=None,
-#         all_versions_param=True  # This is the key: get ALL versions
-#     )
-#
-#     if not all_versions_for_item:
-#         await interaction.followup.send(
-#             content=f"{user_mention}, No versions found for '{target_path}'.",
-#             ephemeral=False)
-#         bot.log.info(f">>> [LIST VERSIONS] INFO: No versions found for '{target_path}'.")
-#         return
-#
-#     # Extract just the version strings and sort them again (though _get_relevant_item_versions already sorts)
-#     version_strings = [entry.get('version', 'Unknown') for entry in all_versions_for_item]
-#     # Filter out "Unknown" versions if they exist (shouldn't happen with proper data)
-#     version_strings = [v for v in version_strings if v != 'Unknown']
-#
-#     if not version_strings:
-#         await interaction.followup.send(
-#             content=f"{user_mention}, No valid version strings found for '{target_path}'.",
-#             ephemeral=False)
-#         bot.log.info(f">>> [LIST VERSIONS] INFO: No valid version strings found for '{target_path}'.")
-#         return
-#
-#     # Use the new VersionListPaginator
-#     paginator = (
-#         user_mention=user_mention,
-#         item_path=target_path,
-#         versions=version_strings,
-#         bot_instance=bot
-#     )
-#
-#     initial_content = paginator._get_page_content(0)
-#     sent_message_paginator = await interaction.followup.send(content=initial_content, view=paginator)
-#     paginator.message = sent_message_paginator
-#
-#     bot.log.info(
-#         f">>> [LIST VERSIONS] INFO: Sent paginated version list for '{target_path}'. Total pages: {paginator.total_pages}.")
+        # --- Check for items that need passwords using refactored classes ---
+        from downloadtools.download_database import DDB
+        from versioning import VersioningManager
+        from downloadtools.encrytion import denc
 
-@bot.tree.command(name="delete", description="Deletes a specific file, folder, or entire upload by its path.")
-@app_commands.describe(
-    target_path="Path to the file or folder to delete (e.g., 'MyFolder/Subfolder/File.txt' or 'MyFolder/Subfolder').",
-    database_file="Database file (e.g., myfiles.db).",
-    include_sub_folders="Set to False to only delete items directly in the specified folder, not sub-folders (only applies when deleting a folder).")
-async def delete_command(interaction: discord.Interaction, target_path: str, database_file: str,
-                         include_sub_folders: bool = True):
-    bot.log.debug(f"Before defer for /delete by {interaction.user.id}")
-    try:
-        # noinspection PyUnresolvedReferences
-        await interaction.response.defer(ephemeral=False)
-        bot.log.debug(f"After successful defer for /delete by {interaction.user.id}")
-    except discord.errors.NotFound as e:
-        bot.log.debug(f"Defer failed for /delete by {interaction.user.id}: {e}")
-        await interaction.followup.send(
-            f"An error occurred while trying to acknowledge your `/delete` command. The interaction might have timed out. Please try again. Error: `{e}`",
-            ephemeral=True)
-        return
-    except Exception as e:
-        bot.log.debug(f"Unexpected error during defer for /delete by {interaction.user.id}: {e}")
-        await interaction.followup.send(
-            f"An unexpected error occurred before processing your `/delete` command. Error: `{e}`", ephemeral=True)
-        return
+        # Temporary instances (no interaction needed for the check)
+        temp_ddb = DDB(interaction=None)
+        temp_version_manager = VersioningManager(db_read_func=bot.db._db_read_sync, log=bot.log)
+        temp_denc = denc(log=bot.log, ddb=temp_ddb, version_manager=temp_version_manager)
 
-    bot.log.debug(f"Calling bot.delete for '{target_path}' by user {interaction.user.id}.")
-    await bot.delete(interaction, target_path, database_file, include_sub_folders)
+        required_passwords_info = await temp_denc._get_items_requiring_password_for_download(
+            database_file, target_path,
+            version_param=None,
+            start_version_param=None,
+            end_version_param=None,
+            all_versions_param=False,
+            can_apply_version_filters=False
+        )
 
-@bot.tree.command(name="removedamaged", description="Removes damaged files from the database.")
-@app_commands.describe(target_path="Path to the file or folder (e.g., 'MyFolder/MyFile.txt' or 'MyFolder').",
-                       database_file="Database file (e.g., myfiles.db).",
-                       include_sub_folders="Set to False to only check files directly in the specified folder.",
-                       check_attachments_existance="Optional: If True, checks Discord attachments for file parts in addition to database entries. If False, only relies on database entries (defaults to False).")
-async def removedamaged_command(interaction: discord.Interaction, target_path: str, database_file: str,
-                                include_sub_folders: bool = True, check_attachments_existance: bool = False):
-    bot.log.debug(f"Before defer for /removedamaged by {interaction.user.id}")
-    try:
-        # noinspection PyUnresolvedReferences
-        await interaction.response.defer(ephemeral=False)
-        bot.log.debug(f"After successful defer for /removedamaged by {interaction.user.id}")
-    except discord.errors.NotFound as e:
-        bot.log.debug(f"Defer failed for /removedamaged by {interaction.user.id}: {e}")
-        await interaction.followup.send(
-            f"An error occurred while trying to acknowledge your `/removedamaged` command. The interaction might have timed out. Please try again. Error: `{e}`",
-            ephemeral=True)
-        return
-    except Exception as e:
-        bot.log.debug(f"Unexpected error during defer for /removedamaged by {interaction.user.id}: {e}")
-        await interaction.followup.send(
-            f"An unexpected error occurred before processing your `/removedamaged` command. Error: `{e}`",
-            ephemeral=True)
-        return
+        if required_passwords_info:
+            bot.log.info(f"Items requiring password found. Presenting modal for user {interaction.user.id}.")
+            modal = DecryptionPasswordModal(
+                bot_instance=bot,                     # still needed for access to bot's attributes
+                original_interaction=interaction,
+                required_passwords_info=required_passwords_info,
+                database_file=database_file,
+                target_path=target_path,
+                download_folder=download_folder
+            )
+            try:
+                await interaction.response.send_modal(modal)
+                bot.log.debug(f"Modal sent to user {interaction.user.id}.")
+            except discord.errors.InteractionResponded:
+                # Fallback button (optional, keep as before)
+                from downloadtools.innerclasses import DecryptionPasswordTriggerView  # ensure this exists
+                await interaction.followup.send(
+                    content=f"{user_mention}, Some items require decryption passwords. Please click the button below to enter them.",
+                    view=DecryptionPasswordTriggerView(bot, interaction, required_passwords_info, database_file,
+                                                       target_path, download_folder)
+                )
+            except Exception as e:
+                bot.log.error(f"Error sending decryption password modal to user {interaction.user.id}: {e}")
+                await interaction.followup.send(
+                    f"{user_mention}, An error occurred while trying to get decryption passwords. Please try again later. Error: `{e}`",
+                    ephemeral=True
+                )
+        else:
+            bot.log.debug(f"No items requiring password for '{target_path}'. Proceeding with download.")
+            seed = {}  # empty seed
+            from download import DownloadContext  # adjust import path as needed
+            ctx = DownloadContext(bot,log,intents=bot.intents, interaction=interaction, enc=True)
+            await ctx.download_filea(
+                target_path=target_path,
+                DB_FILE=database_file,
+                download_folder=download_folder,
+                decryption_password_seed=seed,
+                version_param=None,
+                start_version_param=None,
+                end_version_param=None,
+                all_versions_param=False,
+                can_apply_version_filters=False
+            )
 
-    bot.log.debug(f"Calling bot.remove_damaged for '{target_path}' by user {interaction.user.id}.")
-    await bot.remove_damaged(interaction, target_path, database_file, include_sub_folders,
-                             check_attachments_existance)
 
-@bot.tree.command(name="reindex",
-                  description="Reindexes database to repair corrupted item indexes. Rarely used, mostly for emergency repair.")
-@app_commands.describe(database_file="Database file (e.g., myfiles.db).")
-async def reindex_command(interaction: discord.Interaction, database_file: str):
-    bot.log.debug(f"Before defer for /reindex by {interaction.user.id}")
-    try:
-        # noinspection PyUnresolvedReferences
-        await interaction.response.defer(ephemeral=False)
-        bot.log.debug(f"After successful defer for /reindex by {interaction.user.id}")
-    except discord.errors.NotFound as e:
-        bot.log.debug(f"Defer failed for /reindex by {interaction.user.id}: {e}")
-        await interaction.followup.send(
-            f"An error occurred while trying to acknowledge your `/reindex` command. The interaction might have timed out. Please try again. Error: `{e}`",
-            ephemeral=True)
-        return
-    except Exception as e:
-        bot.log.debug(f"Unexpected error during defer for /reindex by {interaction.user.id}: {e}")
-        await interaction.followup.send(
-            f"An unexpected error occurred before processing your `/reindex` command. Error: `{e}`", ephemeral=True)
-        return
 
-    bot.log.debug(f"Calling bot.reindex_database for '{database_file}' by user {interaction.user.id}.")
-    await bot.reindex_database(interaction, database_file)
 
-bot.run('TOKEN')
+
+
+
+
+
+    @bot.tree.command(name="listfiles", description="Lists uploaded files or contents of a folder, with version control.")
+    @app_commands.describe(database_file="Database file (e.g., myfiles.db).",
+                           target_root_name="Optional: Path to the file or folder to list (e.g., 'MyFolder' or 'MyFolder/SubFolder/File.txt'). Use '.' for all root items.",
+                           check_attachments_existance="Optional: If True, checks Discord attachments for file parts. Defaults to False.",
+                           show_original_name="Optional: If True, displays original names (if available) alongside nicknames. Defaults to False.",
+                           version="Optional: Specific version to list/check (for folders, lists contents of that version; for files, checks that version).",
+                           start_version="Optional: Start of a version range to check existence for.",
+                           end_version="Optional: End of a version range to check existence for. Requires start_version.",
+                           all_versions="Optional: If True, checks existence for all versions of the target item(s). Overrides 'version' and range parameters.",
+                           check_all_versions="Optional: If True, and no other explicit version is given, checks all versions' existence. Defaults to False.")
+    async def listfiles_command(interaction: discord.Interaction, database_file: str,
+                                target_root_name: Optional[str] = None, check_attachments_existance: bool = False,
+                                show_original_name: bool = False,
+                                version: Optional[str] = None,
+                                start_version: Optional[str] = None,
+                                end_version: Optional[str] = None,
+                                all_versions: Optional[bool] = False,  # Changed type from Choice to bool
+                                check_all_versions: Optional[bool] = False):  # Changed type from Choice to bool
+        bot.log.debug(f"Before defer for /listfiles by {interaction.user.id}")
+        try:
+            # noinspection PyUnresolvedReferences
+            await interaction.response.defer(ephemeral=False)
+            bot.log.debug(f"After successful defer for /listfiles by {interaction.user.id}")
+        except discord.errors.NotFound as e:
+            bot.log.debug(f"Defer failed for /listfiles by {interaction.user.id}: {e}")
+            await interaction.followup.send(
+                f"An error occurred while trying to acknowledge your `/listfiles` command. The interaction might have timed out. Please try again. Error: `{e}`",
+                ephemeral=True)
+            return
+        except Exception as e:
+            bot.log.debug(f"Unexpected error during defer for /listfiles by {interaction.user.id}: {e}")
+            await interaction.followup.send(
+                f"An unexpected error occurred before processing your `/listfiles` command. Error: `{e}`",
+                ephemeral=True)
+            return
+
+        bot.log.debugo(
+            f"Calling bot.list_files for '{database_file}' (root: '{target_root_name}', show_original_name: {show_original_name}) by user {interaction.user.id}.")
+        await bot.list_files(
+            interaction,
+            database_file,
+            target_root_name,
+            check_attachments_existance,
+            show_original_name,
+            False,
+            # check_all parameter is no longer directly controlled by user from this command due to complex versioning checks. It's now internal.
+            version=version,
+            start_version=start_version,
+            end_version=end_version,
+            all_versions=all_versions,
+            check_all_versions=check_all_versions
+        )
+
+    # @bot.tree.command(name="listversions", description="Lists all versions of a specific file or folder.")
+    # @app_commands.describe(
+    #     database_file="Database file (e.g., myfiles.db).",
+    #     target_path="The exact path to the file or folder (e.g., 'MyProject/MyDocument.txt' or 'MyProject/MyFolder')."
+    # )
+    # async def listversions_command(interaction: discord.Interaction, database_file: str, target_path: str):
+    #     bot.log.debug(f"Before defer for /listversions by {interaction.user.id}")
+    #     try:
+    #         await interaction.response.defer(ephemeral=False)
+    #         bot.log.debug(f"After successful defer for /listversions by {interaction.user.id}")
+    #     except discord.errors.NotFound as e:
+    #         bot.log.debug(f"Defer failed for /listversions by {interaction.user.id}: {e}")
+    #         await interaction.followup.send(
+    #             f"An error occurred while trying to acknowledge your `/listversions` command. The interaction might have timed out. Please try again. Error: `{e}`",
+    #             ephemeral=True)
+    #         return
+    #     except Exception as e:
+    #         bot.log.debug(f"Unexpected error during defer for /listversions by {interaction.user.id}: {e}")
+    #         await interaction.followup.send(
+    #             f"An unexpected error occurred before processing your `/listversions` command. Error: `{e}`",
+    #             ephemeral=True)
+    #         return
+    #
+    #     user_mention = interaction.user.mention
+    #
+    #     if not database_file.lower().endswith('.db'):
+    #         database_file += '.db'
+    #     DATABASE_FILE = os.path.abspath(os.path.normpath(database_file))
+    #
+    #     if not os.path.exists(DATABASE_FILE):
+    #         await interaction.followup.send(
+    #             content=f"{user_mention}, The database file '{database_file}' was not found. Cannot list versions.",
+    #             ephemeral=False)
+    #         bot.log.error(f">>> [LIST VERSIONS] ERROR: Database file not found at '{DATABASE_FILE}'.")
+    #         return
+    #
+    #     all_db_entries = await bot.db._db_read_sync(DATABASE_FILE, {})
+    #     if not all_db_entries:
+    #         await interaction.followup.send(
+    #             content=f'{user_mention}, No entries found in database: "{database_file}".', ephemeral=False)
+    #         return
+    #
+    #     normalized_target_path = os.path.normpath(target_path).replace(os.path.sep, '/').strip('/')
+    #
+    #     # Resolve the target path to its root_upload_name, relative_path_in_archive, base_filename
+    #     resolved_target_info = await bot._resolve_path_to_db_entry_keys(normalized_target_path, all_db_entries)
+    #
+    #     if not resolved_target_info:
+    #         await interaction.followup.send(
+    #             content=f"{user_mention}, The target item '{target_path}' was not found in the database. Please ensure the path is correct.",
+    #             ephemeral=False)
+    #         bot.log.info(f">>> [LIST VERSIONS] INFO: Target '{target_path}' not found for version listing.")
+    #         return
+    #
+    #     target_r_name, target_r_path, target_b_name, is_target_a_folder = resolved_target_info
+    #
+    #     # Fetch all versions for the identified item
+    #     all_versions_for_item = await bot.version_manager._get_relevant_item_versions(
+    #         DATABASE_FILE,
+    #         target_r_name,
+    #         target_r_path,
+    #         target_b_name,
+    #         version_param=None,
+    #         start_version_param=None,
+    #         end_version_param=None,
+    #         all_versions_param=True  # This is the key: get ALL versions
+    #     )
+    #
+    #     if not all_versions_for_item:
+    #         await interaction.followup.send(
+    #             content=f"{user_mention}, No versions found for '{target_path}'.",
+    #             ephemeral=False)
+    #         bot.log.info(f">>> [LIST VERSIONS] INFO: No versions found for '{target_path}'.")
+    #         return
+    #
+    #     # Extract just the version strings and sort them again (though _get_relevant_item_versions already sorts)
+    #     version_strings = [entry.get('version', 'Unknown') for entry in all_versions_for_item]
+    #     # Filter out "Unknown" versions if they exist (shouldn't happen with proper data)
+    #     version_strings = [v for v in version_strings if v != 'Unknown']
+    #
+    #     if not version_strings:
+    #         await interaction.followup.send(
+    #             content=f"{user_mention}, No valid version strings found for '{target_path}'.",
+    #             ephemeral=False)
+    #         bot.log.info(f">>> [LIST VERSIONS] INFO: No valid version strings found for '{target_path}'.")
+    #         return
+    #
+    #     # Use the new VersionListPaginator
+    #     paginator = (
+    #         user_mention=user_mention,
+    #         item_path=target_path,
+    #         versions=version_strings,
+    #         bot_instance=bot
+    #     )
+    #
+    #     initial_content = paginator._get_page_content(0)
+    #     sent_message_paginator = await interaction.followup.send(content=initial_content, view=paginator)
+    #     paginator.message = sent_message_paginator
+    #
+    #     bot.log.info(
+    #         f">>> [LIST VERSIONS] INFO: Sent paginated version list for '{target_path}'. Total pages: {paginator.total_pages}.")
+
+    @bot.tree.command(name="delete", description="Deletes a specific file, folder, or entire upload by its path.")
+    @app_commands.describe(
+        target_path="Path to the file or folder to delete (e.g., 'MyFolder/Subfolder/File.txt' or 'MyFolder/Subfolder').",
+        database_file="Database file (e.g., myfiles.db).",
+        include_sub_folders="Set to False to only delete items directly in the specified folder, not sub-folders (only applies when deleting a folder).")
+    async def delete_command(interaction: discord.Interaction, target_path: str, database_file: str,
+                             include_sub_folders: bool = True):
+        bot.log.debug(f"Before defer for /delete by {interaction.user.id}")
+        try:
+            # noinspection PyUnresolvedReferences
+            await interaction.response.defer(ephemeral=False)
+            bot.log.debug(f"After successful defer for /delete by {interaction.user.id}")
+        except discord.errors.NotFound as e:
+            bot.log.debug(f"Defer failed for /delete by {interaction.user.id}: {e}")
+            await interaction.followup.send(
+                f"An error occurred while trying to acknowledge your `/delete` command. The interaction might have timed out. Please try again. Error: `{e}`",
+                ephemeral=True)
+            return
+        except Exception as e:
+            bot.log.debug(f"Unexpected error during defer for /delete by {interaction.user.id}: {e}")
+            await interaction.followup.send(
+                f"An unexpected error occurred before processing your `/delete` command. Error: `{e}`", ephemeral=True)
+            return
+
+        bot.log.debug(f"Calling bot.delete for '{target_path}' by user {interaction.user.id}.")
+        await bot.delete(interaction, target_path, database_file, include_sub_folders)
+
+    @bot.tree.command(name="removedamaged", description="Removes damaged files from the database.")
+    @app_commands.describe(target_path="Path to the file or folder (e.g., 'MyFolder/MyFile.txt' or 'MyFolder').",
+                           database_file="Database file (e.g., myfiles.db).",
+                           include_sub_folders="Set to False to only check files directly in the specified folder.",
+                           check_attachments_existance="Optional: If True, checks Discord attachments for file parts in addition to database entries. If False, only relies on database entries (defaults to False).")
+    async def removedamaged_command(interaction: discord.Interaction, target_path: str, database_file: str,
+                                    include_sub_folders: bool = True, check_attachments_existance: bool = False):
+        bot.log.debug(f"Before defer for /removedamaged by {interaction.user.id}")
+        try:
+            # noinspection PyUnresolvedReferences
+            await interaction.response.defer(ephemeral=False)
+            bot.log.debug(f"After successful defer for /removedamaged by {interaction.user.id}")
+        except discord.errors.NotFound as e:
+            bot.log.debug(f"Defer failed for /removedamaged by {interaction.user.id}: {e}")
+            await interaction.followup.send(
+                f"An error occurred while trying to acknowledge your `/removedamaged` command. The interaction might have timed out. Please try again. Error: `{e}`",
+                ephemeral=True)
+            return
+        except Exception as e:
+            bot.log.debug(f"Unexpected error during defer for /removedamaged by {interaction.user.id}: {e}")
+            await interaction.followup.send(
+                f"An unexpected error occurred before processing your `/removedamaged` command. Error: `{e}`",
+                ephemeral=True)
+            return
+
+        bot.log.debug(f"Calling bot.remove_damaged for '{target_path}' by user {interaction.user.id}.")
+        await bot.remove_damaged(interaction, target_path, database_file, include_sub_folders,
+                                 check_attachments_existance)
+
+    @bot.tree.command(name="reindex",
+                      description="Reindexes database to repair corrupted item indexes. Rarely used, mostly for emergency repair.")
+    @app_commands.describe(database_file="Database file (e.g., myfiles.db).")
+    async def reindex_command(interaction: discord.Interaction, database_file: str):
+        bot.log.debug(f"Before defer for /reindex by {interaction.user.id}")
+        try:
+            # noinspection PyUnresolvedReferences
+            await interaction.response.defer(ephemeral=False)
+            bot.log.debug(f"After successful defer for /reindex by {interaction.user.id}")
+        except discord.errors.NotFound as e:
+            bot.log.debug(f"Defer failed for /reindex by {interaction.user.id}: {e}")
+            await interaction.followup.send(
+                f"An error occurred while trying to acknowledge your `/reindex` command. The interaction might have timed out. Please try again. Error: `{e}`",
+                ephemeral=True)
+            return
+        except Exception as e:
+            bot.log.debug(f"Unexpected error during defer for /reindex by {interaction.user.id}: {e}")
+            await interaction.followup.send(
+                f"An unexpected error occurred before processing your `/reindex` command. Error: `{e}`", ephemeral=True)
+            return
+
+        bot.log.debug(f"Calling bot.reindex_database for '{database_file}' by user {interaction.user.id}.")
+        await bot.reindex_database(interaction, database_file)
+
+    bot.run('token')

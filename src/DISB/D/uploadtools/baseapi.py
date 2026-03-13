@@ -2,13 +2,26 @@ import random
 import time
 import aiohttp
 import discord
+from discord.ext import commands
 import asyncio
 import io
 from typing import Optional
 class BASEapi:
-    def __init__(self,log, *, intents: discord.Intents):
-        super().__init__(command_prefix=["/"], intents=intents)
-        self.log = log
+    def __init__(self, log, bot_instance=None, *, intents: discord.Intents = None):
+        if bot_instance:
+            # Use the existing bot instance
+            self.bot = bot_instance
+            self.log = log
+            # Copy over the bot's methods we need
+            self.get_channel = bot_instance.get_channel
+            self.fetch_channel = bot_instance.fetch_channel
+            self.is_ready = bot_instance.is_ready
+            self.wait_until_ready = bot_instance.wait_until_ready
+            self.http = bot_instance.http
+        else:
+            # Create a new bot instance (old behavior)
+            super().__init__(command_prefix=["/"], intents=intents)
+            self.log = log
     async def send_message_robustly(self, channel_id: int, content: Optional[str] = None,
                                     file: Optional[discord.File] = None, ephemeral: bool = False) -> Optional[
         discord.Message]:

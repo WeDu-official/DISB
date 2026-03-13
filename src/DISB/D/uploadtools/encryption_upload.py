@@ -22,7 +22,7 @@ class EncryptionManager:
         current_version_for_upload, user_seed
         """
         all_db_entries = await self.db._db_read_sync(DB_FILE, {})
-        resolved_target_info = await self.utils._resolve_path_to_db_entry_keys(target_item_path, all_db_entries)
+        resolved_target_info = await self.db._resolve_path_to_db_entry_keys(target_item_path, all_db_entries)
 
         if not resolved_target_info:
             raise ValueError(f"{user_mention}, Error: Target item '{target_item_path}' not found in DB.")

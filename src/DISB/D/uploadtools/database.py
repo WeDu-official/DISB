@@ -271,3 +271,71 @@ class DatabaseManager:
         if not DB_FILE.lower().endswith('.db'):
             DB_FILE += '.db'
         return os.path.abspath(os.path.normpath(DB_FILE))
+    async def _resolve_path_to_db_entry_keys(self, target_path: str, all_db_entries: List[Dict[str, Any]]) -> Optional[
+        Tuple[str, str, str, bool]]:
+        """
+        When a user gives a path like "MyProject/Subfolder/File.txt", you can figure out which DB entry it corresponds to, without considering versions.
+        """
+        normalized_target_path = os.path.normpath(target_path).replace(os.path.sep, '/').strip('/')
+        if not normalized_target_path:
+            return None  # Should be handled as global scan, not path resolution
+
+        # Try to match as a specific file
+        for entry in all_db_entries:
+            r_name = entry.get("root_upload_name")
+            r_path = (entry.get("relative_path_in_archive") or "").replace(os.path.sep, '/').strip('/')
+            b_name = entry.get("base_filename")
+
+            if b_name == "_DIR_":  # Skip folder entries for file matching
+                continue
+
+            current_file_conceptual_path = f"{r_name}/{r_path}/{b_name}"
+            current_file_conceptual_path = re.sub(r'/{2,}', '/', current_file_conceptual_path).strip('/')
+
+            if normalized_target_path == current_file_conceptual_path:
+                self.log.debug(f"Resolved '{target_path}' as file: ({r_name}, {r_path}, {b_name}, False)")
+                return r_name, r_path, b_name, False  # is_folder_target = False
+
+        # Try to match as a specific folder (including root folder)
+        # Sort by path length descending to prioritize more specific paths (e.g., 'A/B' before 'A')
+        for entry in sorted(all_db_entries, key=lambda e: len(e.get("relative_path_in_archive", "")), reverse=True):
+            r_name = entry.get("root_upload_name")
+            r_path = (entry.get("relative_path_in_archive") or "").replace(os.path.sep, '/').strip('/')
+            b_name = entry.get("base_filename")
+
+            if b_name != "_DIR_":  # Skip file entries for folder matching
+                continue
+
+            current_folder_conceptual_path = f"{r_name}/{r_path}"
+            current_folder_conceptual_path = re.sub(r'/{2,}', '/', current_folder_conceptual_path).strip('/')
+
+            if normalized_target_path == current_folder_conceptual_path:
+                self.log.debug(f"Resolved '{target_path}' as folder: ({r_name}, {r_path}, {b_name}, True)")
+                return r_name, r_path, b_name, True  # is_folder_target = True
+
+        # Try to match as a top-level root_upload_name (could be folder or single file upload)
+        # This is a fallback if the full path didn't match a nested item.
+        if '/' not in normalized_target_path:
+            # Check if it's a root folder
+            for entry in all_db_entries:
+                if entry.get("root_upload_name") == normalized_target_path and \
+                        (entry.get("relative_path_in_archive") == "" or entry.get(
+                            "relative_path_in_archive") is None) and \
+                        entry.get("base_filename") == "_DIR_":
+                    self.log.debug(
+                        f"Resolved '{target_path}' as top-level root folder: ({normalized_target_path}, '', '_DIR_', True)")
+                    return normalized_target_path, "", "_DIR_", True  # is_folder_target = True
+
+            # Check if it's a top-level single file upload (where root_upload_name == base_filename and no relative path)
+            for entry in all_db_entries:
+                if entry.get("root_upload_name") == normalized_target_path and \
+                        (entry.get("relative_path_in_archive") == "" or entry.get(
+                            "relative_path_in_archive") is None) and \
+                        entry.get("base_filename") == normalized_target_path and \
+                        entry.get("base_filename") != "_DIR_":
+                    self.log.debug(
+                        f"Resolved '{target_path}' as top-level single file: ({normalized_target_path}, '', {normalized_target_path}, False)")
+                    return normalized_target_path, "", normalized_target_path, False  # is_folder_target = False
+
+        self.log.debug(f"Could not resolve '{target_path}' to any specific database entry.")
+        return None

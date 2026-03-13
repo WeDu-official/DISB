@@ -36,15 +36,25 @@ class UPLOAD:
 
         # Normalize DB_FILE path
         DATABASE_FILE = self.db._normalize_db_file_path(DB_FILE)
-
         # --- Step 1: Determine root_upload_name and nicknaming ---
         root_upload_name, original_root_name_for_db, is_nicknamed_flag_for_db = \
             await self.upmang._determine_root_name(local_path, custom_root_name, interaction)
-
         if not root_upload_name:
             return  # Early exit if root name determination failed
+        # --- Step 2: Check for duplicate root uploads (only for new_upload) ---
+        if upload_mode == "new_upload":
+            if await self.db._check_duplicate_root_upload_name(DATABASE_FILE, root_upload_name, new_version_string):
+                await interaction.followup.send(
+                    f"{user_mention}, An item with the name '{root_upload_name}' already exists. Choose a different name or use `upload_mode: new_version`.",
+                    ephemeral=False
+                )
+                self.log.info(f">>> [UPLOAD] Duplicate root '{root_upload_name}' found. Aborting.")
+                return
+        # --- Step 3: Concurrency control ---
+        if not await self.upmang._acquire_user_upload_slot(user_id, root_upload_name, interaction):
+            return
 
-        # --- Step 2: Determine encryption key and versioning ---
+        # --- Step 4: Determine encryption key and versioning ---
         (
             current_version_for_upload,
             inherited_encryption_mode,
@@ -68,19 +78,6 @@ class UPLOAD:
         )
         print(inherited_store_hash_flag)
 
-        # --- Step 3: Check for duplicate root uploads (only for new_upload) ---
-        if upload_mode == "new_upload":
-            if await self.db._check_duplicate_root_upload_name(DATABASE_FILE, root_upload_name, new_version_string):
-                await interaction.followup.send(
-                    f"{user_mention}, An item with the name '{root_upload_name}' already exists. Choose a different name or use `upload_mode: new_version`.",
-                    ephemeral=False
-                )
-                self.log.info(f">>> [UPLOAD] Duplicate root '{root_upload_name}' found. Aborting.")
-                return
-
-        # --- Step 4: Concurrency control ---
-        if not await self.upmang._acquire_user_upload_slot(user_id, root_upload_name, interaction):
-            return
 
         # --- Step 5: Determine chunk size ---
         current_chunk_size = self.utils._get_chunk_size(inherited_encryption_mode)
@@ -121,6 +118,7 @@ class UPLOAD:
                     version=current_version_for_upload
                 )
             else:
+                print(channel_id)
                 await self.upmang.upload_single_file(
                     interaction,
                     local_path,

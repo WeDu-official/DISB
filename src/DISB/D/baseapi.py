@@ -4,8 +4,9 @@ import aiohttp
 import discord
 import asyncio
 import io
+from discord.ext import commands
 from typing import Optional
-class encrybase:
+class BASEapi(discord.ext.commands.Bot):
     def __init__(self,log, *, intents: discord.Intents):
         super().__init__(command_prefix=["/"], intents=intents)
         self.log = log
